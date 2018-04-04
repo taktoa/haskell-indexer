@@ -164,7 +164,7 @@ maybeAbsBinds :: HsBindLR a b
 maybeAbsBinds (AbsBinds _ _ exports _ binds) =
     let ids = map (abe_poly &&& (Just . abe_mono)) exports
     in Just $! (binds, ids, NormalAbs)
-#if __GLASGOW_HASKELL__ >= 800
+#if (__GLASGOW_HASKELL__ >= 800) && (__GLASGOW_HASKELL__ < 804)
 maybeAbsBinds (AbsBindsSig _ _ poly _ _ bind) =
     let binds = Bag.unitBag bind
         ids = [(poly, Nothing)]
