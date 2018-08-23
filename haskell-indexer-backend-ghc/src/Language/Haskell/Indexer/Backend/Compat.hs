@@ -15,7 +15,9 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE CPP #-}
 {-# LANGUAGE ExistentialQuantification #-}
+{-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE PatternSynonyms #-}
+{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE ViewPatterns #-}
 
 -- | Module trying to expose a unified (or at least simplified) view of the GHC
@@ -45,10 +47,30 @@ import HsDecls (ConDecl(..), TyClDecl(ClassDecl, DataDecl, SynDecl))
 import HsExpr (HsExpr(..), HsRecordBinds)
 import qualified HsTypes
 import HsTypes (HsType(HsTyVar), LHsType)
-import Id (Id)
-import Name (Name)
 import Outputable (Outputable)
 import SrcLoc (Located, GenLocated(L), unLoc, getLoc)
+import RdrName (RdrName)
+import Id (Id)
+import Name (Name)
+
+#if __GLASGOW_HASKELL__ >= 804
+import qualified HsExtension
+
+type GhcPs = HsExtension.GhcPs
+type GhcRn = HsExtension.GhcRn
+type GhcTc = HsExtension.GhcTc
+
+type IdP p = HsExtension.IdP p
+#else
+type GhcPs = RdrName
+type GhcRn = Name
+type GhcTc = Id
+
+type family IdP p
+type instance IdP GhcPs = RdrName
+type instance IdP GhcRn = Name
+type instance IdP GhcTc = Id
+#endif
 
 #if __GLASGOW_HASKELL__ >= 800
 showPackageName :: UnitId -> String
@@ -76,7 +98,9 @@ mayUnLoc = id
 hsGroupInstDecls = hs_instds
 #endif
 
-pattern RecordConCompat :: Located Id -> HsRecordBinds Id -> HsExpr Id
+pattern RecordConCompat :: Located (IdP GhcTc)
+                        -> HsRecordBinds GhcTc
+                        -> HsExpr GhcTc
 pattern RecordConCompat lConId recBinds <-
 #if __GLASGOW_HASKELL__ >= 800
     RecordCon lConId _ _ recBinds
@@ -116,13 +140,13 @@ pattern TypeSigCompat names ty <-
 
 #if __GLASGOW_HASKELL__ >= 800
 -- | Monomorphising type so uniplate is happier.
-namesFromHsIbSig :: HsTypes.LHsSigType Name -> [Name]
+namesFromHsIbSig :: HsTypes.LHsSigType GhcRn -> [IdP GhcRn]
 namesFromHsIbSig = HsTypes.hsib_vars
 
-namesFromHsWC :: HsTypes.LHsWcType Name -> [Name]
+namesFromHsWC :: HsTypes.LHsWcType GhcRn -> [IdP GhcRn]
 namesFromHsWC = HsTypes.hswc_wcs
 
-namesFromHsIbWc :: HsTypes.LHsSigWcType Name -> [Name]
+namesFromHsIbWc :: HsTypes.LHsSigWcType GhcRn -> [IdP GhcRn]
 namesFromHsIbWc =
     -- No, can't use the above introduced names, because the types resolve
     -- differently here. Type-level functions FTW.
@@ -133,7 +157,11 @@ namesFromHsIbWc =
 #endif
 #endif
 
-data ClsSigBound = forall a. Outputable a => ClsSigBound ![Located Name] a
+#if __GLASGOW_HASKELL__ >= 804
+data ClsSigBound = forall a. Outputable a => ClsSigBound ![Located (IdP GhcRn)] a
+#else
+data ClsSigBound = forall a. Outputable a => ClsSigBound ![Located GhcRn] a
+#endif
 
 clsSigBound (TypeSigCompat ns ty) = Just (ClsSigBound ns ty)
 #if __GLASGOW_HASKELL__ >= 800
@@ -159,9 +187,15 @@ conDeclNames (ConDecl conNames _ _ _ _ _ _ _) = conNames
 data AbsBindsKind = NormalAbs | SigAbs
     deriving (Eq)
 
+#if __GLASGOW_HASKELL__ >= 804
+maybeAbsBinds :: HsBindLR a b
+              -> Maybe (LHsBinds a, [(IdP a, Maybe (IdP a))], AbsBindsKind)
+maybeAbsBinds (AbsBinds _ _ exports _ binds _) =
+#else
 maybeAbsBinds :: HsBindLR a b
               -> Maybe (LHsBinds a, [(a, Maybe a)], AbsBindsKind)
 maybeAbsBinds (AbsBinds _ _ exports _ binds) =
+#endif
     let ids = map (abe_poly &&& (Just . abe_mono)) exports
     in Just $! (binds, ids, NormalAbs)
 #if (__GLASGOW_HASKELL__ >= 800) && (__GLASGOW_HASKELL__ < 804)
@@ -177,13 +211,13 @@ pattern AbsBindsCompat binds ids abskind <-
 
 -- | Represents various spans of 'instance' declarations separately.
 data SplitInstType = SplitInstType
-    { onlyClass :: !Name
-    , classAndInstance :: !(LHsType Name)
+    { onlyClass :: !(IdP GhcRn)
+    , classAndInstance :: !(LHsType GhcRn)
       -- ^ The location is properly set to the span of 'Cls Inst'
     }
 
 #if __GLASGOW_HASKELL__ >= 800
-mySplitInstanceType :: HsTypes.LHsSigType Name -> Maybe SplitInstType
+mySplitInstanceType :: HsTypes.LHsSigType GhcRn -> Maybe SplitInstType
 mySplitInstanceType ty = do
     let (_, body) = HsTypes.splitLHsForAllTy (HsTypes.hsSigType ty)
     clsName <- HsTypes.getLHsInstDeclClass_maybe ty
@@ -192,7 +226,7 @@ mySplitInstanceType ty = do
         , classAndInstance = body
         }
 #else
-mySplitInstanceType :: LHsType Name -> Maybe SplitInstType
+mySplitInstanceType :: LHsType GhcRn -> Maybe SplitInstType
 mySplitInstanceType ty = do
     (_, _, L clsL clsName, instLTys) <- HsTypes.splitLHsInstDeclTy_maybe ty
     let clsInstTy = HsTypes.mkHsAppTys (L clsL (HsTypes.HsTyVar clsName))
@@ -205,14 +239,13 @@ mySplitInstanceType ty = do
 #endif
 
 #if __GLASGOW_HASKELL__ >= 802
-hsTypeVarName :: HsType Name -> Maybe (Located Name)
+hsTypeVarName :: HsType GhcRn -> Maybe (Located (IdP GhcRn))
 hsTypeVarName (HsTyVar _ n) = Just $! n
 #elif __GLASGOW_HASKELL__ >= 800
-hsTypeVarName :: HsType Name -> Maybe (Located Name)
+hsTypeVarName :: HsType GhcRn -> Maybe (Located (IdP GhcRn))
 hsTypeVarName (HsTyVar n) = Just $! n
 #else
-hsTypeVarName :: HsType Name -> Maybe Name
+hsTypeVarName :: HsType GhcRn -> Maybe (IdP GhcRn)
 hsTypeVarName (HsTyVar n) = Just $! n
 #endif
 hsTypeVarName _ = Nothing
-
